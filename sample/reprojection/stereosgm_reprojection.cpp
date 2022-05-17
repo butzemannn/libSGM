@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #include <iostream>
+#include <fstream>
 #include <iomanip>
 #include <string>
 #include <chrono>
@@ -150,9 +151,9 @@ void reprojectPointsTo3D(const cv::Mat& disparity, const CameraParameters& camer
 
 void drawPoints3D(const std::vector<cv::Point3f>& points, cv::Mat& draw)
 {
-	const int SIZE_X = 512;
+	const int SIZE_X = 1024;
 	const int SIZE_Z = 1024;
-	const int maxz = 20; // [meter]
+	const int maxz = 80; // [meter]
 	const double pixelsPerMeter = 1. * SIZE_Z / maxz;
 
 	draw = cv::Mat::zeros(SIZE_Z, SIZE_X, CV_8UC3);
@@ -170,8 +171,19 @@ void drawPoints3D(const std::vector<cv::Point3f>& points, cv::Mat& draw)
 	}
 }
 
+void saveVectorToFile(std::vector<cv::Point3f> points, std::string file) 
+{
+	std::ofstream outFile(file);
+	for (const cv::Point3f e : points) {
+		outFile << e.x << ";";
+		outFile << e.y << ";";
+		outFile << e.z << "\n";
+	}	
+}
+
 int main(int argc, char* argv[])
 {
+	// point clouds are saved
 	if (argc < 4) {
 		std::cout << "usage: " << argv[0] << " left-image-format right-image-format camera.xml [disp_size] [subpixel_enable(0: false, 1:true)]" << std::endl;
 		std::exit(EXIT_FAILURE);
@@ -179,8 +191,10 @@ int main(int argc, char* argv[])
 
 	const int first_frame = 1;
 
-	cv::Mat I1 = cv::imread(format_string(argv[1], first_frame), -1);
-	cv::Mat I2 = cv::imread(format_string(argv[2], first_frame), -1);
+	std::cout << format_string(argv[1], first_frame) << std::endl;
+
+	cv::Mat I1 = cv::imread(format_string(argv[1], first_frame), CV_8UC3);
+	cv::Mat I2 = cv::imread(format_string(argv[2], first_frame), CV_8UC3);
 	const cv::FileStorage fs(argv[3], cv::FileStorage::READ);
 	const int disp_size = argc >= 5 ? std::stoi(argv[4]) : 128;
 	const bool subpixel = argc >= 6 ? std::stoi(argv[5]) != 0 : true;
@@ -208,7 +222,7 @@ int main(int argc, char* argv[])
 	const int input_bytes = input_depth * width * height / 8;
 	const int output_bytes = output_depth * width * height / 8;
 
-	const sgm::StereoSGM::Parameters params{10, 120, 0.95f, subpixel};
+	const sgm::StereoSGM::Parameters params{6, 96, 0.95f, subpixel};
 
 	sgm::StereoSGM sgm(width, height, disp_size, input_depth, output_depth, sgm::EXECUTE_INOUT_CUDA2CUDA, params);
 
@@ -218,13 +232,13 @@ int main(int argc, char* argv[])
 
 	device_buffer d_I1(input_bytes), d_I2(input_bytes), d_disparity(output_bytes);
 
+	std::stringstream fileLocation;
 	for (int frame_no = first_frame;; frame_no++) {
 
-		I1 = cv::imread(format_string(argv[1], frame_no), -1);
-		I2 = cv::imread(format_string(argv[2], frame_no), -1);
+		I1 = cv::imread(format_string(argv[1], frame_no), CV_8UC3);
+		I2 = cv::imread(format_string(argv[2], frame_no), CV_8UC3);
 		if (I1.empty() || I2.empty()) {
-			frame_no = first_frame;
-			continue;
+			break;
 		}
 
 		cudaMemcpy(d_I1.data, I1.data, input_bytes, cudaMemcpyHostToDevice);
@@ -249,21 +263,28 @@ int main(int argc, char* argv[])
 
 		disparity.convertTo(disparity_32f, CV_32F, subpixel ? 1. / sgm::StereoSGM::SUBPIXEL_SCALE : 1);
 		reprojectPointsTo3D(disparity_32f, camera, points, subpixel);
-		drawPoints3D(points, draw);
+		// store points here
+		// points std::vector<cv::Point3f>	
+		fileLocation.str("");
+		fileLocation << "./csv/" << std::setfill('0') << std::setw(9) << frame_no << ".csv";
+		
+		saveVectorToFile(points, fileLocation.str());
+		
+		//drawPoints3D(points, draw);
 
-		disparity_32f.convertTo(disparity_8u, CV_8U, 255. / disp_size);
-		cv::applyColorMap(disparity_8u, disparity_color, cv::COLORMAP_JET);
-		disparity_color.setTo(cv::Scalar(0, 0, 0), disparity_32f < 0); // invalid disparity will be negative
-		cv::putText(disparity_color, format_string("sgm execution time: %4.1f[msec] %4.1f[FPS]", 1e-3 * duration, fps),
-			cv::Point(50, 50), 2, 0.75, cv::Scalar(255, 255, 255));
+		//disparity_32f.convertTo(disparity_8u, CV_8U, 255. / disp_size);
+		//cv::applyColorMap(disparity_8u, disparity_color, cv::COLORMAP_JET);
+		//disparity_color.setTo(cv::Scalar(0, 0, 0), disparity_32f < 0); // invalid disparity will be negative
+		//cv::putText(disparity_color, format_string("sgm execution time: %4.1f[msec] %4.1f[FPS]", 1e-3 * duration, fps),
+		//	cv::Point(50, 50), 2, 0.75, cv::Scalar(255, 255, 255));
 
-		cv::imshow("left image", I1);
-		cv::imshow("disparity", disparity_color);
-		cv::imshow("points", draw);
+		//cv::imshow("left image", I1);
+		//cv::imshow("disparity", disparity_color);
+		//cv::imshow("points", draw);
 
-		const char c = cv::waitKey(1);
-		if (c == 27) // ESC
-			break;
+		//const char c = cv::waitKey(1);
+		//if (c == 27) // ESC
+	//		break;
 	}
 
 	return 0;
