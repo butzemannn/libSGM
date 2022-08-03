@@ -25,7 +25,7 @@ endif()
 project(libSGM VERSION 2.7.0)
 
 if(BUILD_OPENCV_WRAPPER)
-	find_package(OpenCV REQUIRED core)
+	find_package(OpenCV 4.2 EXACT PATHS /usr/lib/x86_64-linux-gnu/cmake/opencv4 REQUIRED core)
 	include_directories(${OpenCV_INCLUDE_DIRS})
 endif()
 

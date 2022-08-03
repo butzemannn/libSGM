@@ -8,7 +8,7 @@ endif()
 
 find_package(CUDA REQUIRED)
 
-find_package(OpenCV REQUIRED)
+find_package(OpenCV 4.2 EXACT PATHS /usr/lib/x86_64-linux-gnu/cmake/opencv4 REQUIRED)
 if (OpenCV_VERSION VERSION_LESS 3.0)
 	message(FATAL_ERROR "Error: OpenCV version requires at least 3.0")
 endif()

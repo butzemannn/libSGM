@@ -52,12 +52,22 @@ def load_calib_file(file_location: str) -> np.ndarray:
             return matrix
 
 
-def save_calib_file(file_location: str, fx: np.float32, fy: np.float32, cx: np.float32, cy: np.float32):
+def save_calib_file(
+        file_location: str, 
+        fx: np.float32, 
+        fy: np.float32, 
+        cx: np.float32, 
+        cy: np.float32, 
+        p0t: np.float32, 
+        p1t: np.float32
+        ) -> None:
     root = ET.Element("opencv_storage")
     flx = ET.SubElement(root, "FocalLengthX")
     fly = ET.SubElement(root, "FocalLengthY")
     ctx = ET.SubElement(root, "CenterX")
     cty = ET.SubElement(root, "CenterY")
+    p0 = ET.SubElement(root, "P0")
+    p1 = ET.SubElement(root, "P1")
     bl = ET.SubElement(root, "BaseLine")
     h = ET. SubElement(root, "Height")
     t = ET.SubElement(root, "Tilt")
@@ -66,6 +76,8 @@ def save_calib_file(file_location: str, fx: np.float32, fy: np.float32, cx: np.f
     fly.text = fy
     ctx.text = cx
     cty.text = cy
+    p0.text = p0t
+    p1.text = p1t
     bl.text = "0.54"
     h.text = "1.65"
     t.text = "0."
@@ -75,7 +87,7 @@ def save_calib_file(file_location: str, fx: np.float32, fy: np.float32, cx: np.f
 
             
 
-def generate_calib_files(source_folder: str, result_folder: str):
+def generate_calib_files(source_folder: str, result_folder: str) -> None:
     if not os.path.isdir(source_folder):
         raise TypeError("The source folder must be a folder")
 
@@ -86,7 +98,7 @@ def generate_calib_files(source_folder: str, result_folder: str):
     printProgressBar(0, len(calib_files), prefix='Progress:', suffix='Complete', length=50)
     for i, calib_file in enumerate(calib_files):
         matrix = load_calib_file(f"{source_folder}/{calib_file}")
-        save_calib_file(f"{result_folder}/{calib_file[:-4]}.xml", matrix[0,0], matrix[1,1], matrix[0,2], matrix[1,2])
+        save_calib_file(f"{result_folder}/{calib_file[:-4]}.xml", matrix[0,0], matrix[1,1], matrix[0,2], matrix[1,2], matrix[0,3], matrix[1,3])
         printProgressBar(i+1, len(calib_files), prefix='Progress:', suffix='Complete', length=50)
 
 

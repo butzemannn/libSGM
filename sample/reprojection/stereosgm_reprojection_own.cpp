@@ -15,7 +15,6 @@ limitations under the License.
 */
 
 #include <iostream>
-#include <fstream>
 #include <iomanip>
 #include <string>
 #include <chrono>
@@ -52,8 +51,6 @@ struct CameraParameters
 	float baseline;           //!< baseline (meter)
 	float height;             //!< height position (meter), ignored when ROAD_ESTIMATION_AUTO
 	float tilt;               //!< tilt angle (radian), ignored when ROAD_ESTIMATION_AUTO
-	float p0;
-	float p1;
 };
 
 // Transformation between pixel coordinate and world coordinate
@@ -61,6 +58,8 @@ struct CoordinateTransform
 {
 	CoordinateTransform(const CameraParameters& camera) : camera(camera)
 	{
+		sinTilt = (sinf(camera.tilt));
+		cosTilt = (cosf(camera.tilt));
 		bf = camera.baseline * camera.fu;
 		invfu = 1.f / camera.fu;
 		invfv = 1.f / camera.fv;
@@ -72,10 +71,14 @@ struct CoordinateTransform
 		const float v = pt.y;
 
 		const float Zc = bf / d;
-		const float Xc = invfu * ((u - camera.u0) * Zc - camera.p0);
-		const float Yc = invfv * ((v - camera.v0) * Zc - camera.p1);
+		const float Xc = invfu * (u - camera.u0) * Zc;
+		const float Yc = invfv * (v - camera.v0) * Zc;
 
-		return cv::Point3f(Xc, Yc, Zc);
+		const float Xw = Xc;
+		const float Yw = Yc * cosTilt + Zc * sinTilt;
+		const float Zw = Zc * cosTilt - Yc * sinTilt;
+
+		return cv::Point3f(Xw, Yw, Zw);
 	}
 
 	CameraParameters camera;
@@ -167,76 +170,62 @@ void drawPoints3D(const std::vector<cv::Point3f>& points, cv::Mat& draw)
 	}
 }
 
-void saveVectorToFile(std::vector<cv::Point3f> points, std::string file) 
+int compute(const char* lImgLoc, const char* rImgLoc, const char* xml, bool useDispSize, const char* dispSize, bool useSubPixel)
 {
-	std::ofstream outFile(file);
-	for (const cv::Point3f e : points) {
-		outFile << e.x << ";";
-		outFile << e.y << ";";
-		outFile << e.z << "\n";
-	}	
-}
-
-int main(int argc, char* argv[])
-{
-	// point clouds are saved
-	if (argc < 4) {
-		std::cout << "usage: " << argv[0] << " left-image-format right-image-format camera.xml [disp_size] [subpixel_enable(0: false, 1:true)]" << std::endl;
-		std::exit(EXIT_FAILURE);
-	}
-
 	const int first_frame = 1;
-	cv::FileStorage fs(format_string(argv[3], first_frame), cv::FileStorage::READ);
-	const int disp_size = argc >= 5 ? std::stoi(argv[4]) : 128;
-	const bool subpixel = argc >= 6 ? std::stoi(argv[5]) != 0 : true;
-	const int input_depth = 8;
+
+	std::cout << format_string(lImgLoc, first_frame) << std::endl;
+
+	cv::Mat I1 = cv::imread(format_string(lImgLoc, first_frame), CV_8UC3);
+	cv::Mat I2 = cv::imread(format_string(rImgLoc, first_frame), CV_8UC3);
+	const cv::FileStorage fs(xml, cv::FileStorage::READ);
+	const int disp_size = useDispSize ? std::stoi(dispSize) : 128;
+	const bool subpixel = useSubPixel == false ? false : true;
 	const int output_depth = 16;
 
-	std::stringstream fileLocation;
+	ASSERT_MSG(!I1.empty() && !I2.empty(), "imread failed.");
+	ASSERT_MSG(fs.isOpened(), "camera.xml read failed.");
+	ASSERT_MSG(I1.size() == I2.size() && I1.type() == I2.type(), "input images must be same size and type.");
+	ASSERT_MSG(I1.type() == CV_8U || I1.type() == CV_16U, "input image format must be CV_8U or CV_16U.");
+	ASSERT_MSG(disp_size == 64 || disp_size == 128 || disp_size == 256, "disparity size must be 64, 128 or 256.");
+
+	// read camera parameters
+	CameraParameters camera;
+	camera.fu = fs["FocalLengthX"];
+	camera.fv = fs["FocalLengthY"];
+	camera.u0 = fs["CenterX"];
+	camera.v0 = fs["CenterY"];
+	camera.baseline = fs["BaseLine"];
+	camera.tilt = fs["Tilt"];
+
+	const int width = I1.cols;
+	const int height = I1.rows;
+
+	const int input_depth = I1.type() == CV_8U ? 8 : 16;
+	const int input_bytes = input_depth * width * height / 8;
+	const int output_bytes = output_depth * width * height / 8;
+
+	const sgm::StereoSGM::Parameters params{6, 96, 0.95f, subpixel};
+
+	sgm::StereoSGM sgm(width, height, disp_size, input_depth, output_depth, sgm::EXECUTE_INOUT_CUDA2CUDA, params);
+
+	cv::Mat disparity(height, width, CV_16S);
+	cv::Mat disparity_8u, disparity_32f, disparity_color, draw;
+	std::vector<cv::Point3f> points;
+
+	device_buffer d_I1(input_bytes), d_I2(input_bytes), d_disparity(output_bytes);
+
 	for (int frame_no = first_frame;; frame_no++) {
 
-		cv::Mat I1 = cv::imread(format_string(argv[1], frame_no), -1);
-		cv::Mat I2 = cv::imread(format_string(argv[2], frame_no), -1);
+		I1 = cv::imread(format_string(lImgLoc, frame_no), CV_8UC3);
+		I2 = cv::imread(format_string(rImgLoc, frame_no), CV_8UC3);
 		if (I1.empty() || I2.empty()) {
-			break;
+			frame_no = first_frame;
+			continue;
 		}
 
-		cv::Mat I1_Gray, I2_Gray;
-		cv::cvtColor(I1, I1_Gray, cv::COLOR_BGR2GRAY);
-		cv::cvtColor(I2, I2_Gray, cv::COLOR_BGR2GRAY);
-		
-	        const int width = I1.cols;
-	        const int height = I1.rows;
-	        const int input_bytes = width * height * sizeof(uint8_t);
-	        const int output_bytes = width * height * sizeof(int16_t);
-
-	        const sgm::StereoSGM::Parameters params{6, 96, 0.95f, subpixel};
-	        sgm::StereoSGM sgm(width, height, disp_size, input_depth, output_depth, sgm::EXECUTE_INOUT_CUDA2CUDA, params);
-
-	        cv::Mat disparity(height, width, CV_16SC1);
-	        cv::Mat disparity_8u, disparity_32f, disparity_color, draw;
-        	std::vector<cv::Point3f> points;
-
-	        device_buffer d_I1(input_bytes), d_I2(input_bytes), d_disparity(output_bytes);
-		
-		// update camera parameters
-		cv::FileStorage fs(format_string(argv[3], frame_no), cv::FileStorage::READ);
-		ASSERT_MSG(fs.isOpened(), "camera.xml read failed.");
-		CameraParameters camera;
-		camera.fu = fs["FocalLengthX"];
-		camera.fv = fs["FocalLengthY"];
-		camera.u0 = fs["CenterX"];
-		camera.v0 = fs["CenterY"];
-		camera.baseline = fs["BaseLine"];
-		camera.tilt = fs["Tilt"];
-		camera.p0 = fs["P0"];
-		camera.p1 = fs["P1"];
-		// TODO: Read from xml file.
-                //camera.p0 = 4.575831000000e+01;
-		//camera.p1 = -3.454157000000e-01;
-
-		cudaMemcpy(d_I1.data, I1_Gray.data, input_bytes, cudaMemcpyHostToDevice);
-		cudaMemcpy(d_I2.data, I2_Gray.data, input_bytes, cudaMemcpyHostToDevice);
+		cudaMemcpy(d_I1.data, I1.data, input_bytes, cudaMemcpyHostToDevice);
+		cudaMemcpy(d_I2.data, I2.data, input_bytes, cudaMemcpyHostToDevice);
 
 		const auto t1 = std::chrono::system_clock::now();
 
@@ -249,22 +238,14 @@ int main(int argc, char* argv[])
 
 		cudaMemcpy(disparity.data, d_disparity.data, output_bytes, cudaMemcpyDeviceToHost);
 
-		disparity.convertTo(disparity_32f, CV_32FC1, subpixel ? 1. / sgm::StereoSGM::SUBPIXEL_SCALE : 1);
-		reprojectPointsTo3D(disparity_32f, camera, points, subpixel);
-		fileLocation.str("");
-		fileLocation << "./csv/" << std::setfill('0') << std::setw(6) << frame_no << ".csv";
-		saveVectorToFile(points, fileLocation.str());
-		
-		/*
+		// draw results
 		if (I1.type() != CV_8U) {
-                        cv::normalize(I1, I1, 0, 255, cv::NORM_MINMAX);
-                        I1.convertTo(I1, CV_8U);
-                }
-                if (I2.type() != CV_8U) {
-                        cv::normalize(I2, I2, 0, 255, cv::NORM_MINMAX);
-                        I2.convertTo(I2, CV_8U);
-                }
-		   
+			cv::normalize(I1, I1, 0, 255, cv::NORM_MINMAX);
+			I1.convertTo(I1, CV_8U);
+		}
+
+		disparity.convertTo(disparity_32f, CV_32F, subpixel ? 1. / sgm::StereoSGM::SUBPIXEL_SCALE : 1);
+		reprojectPointsTo3D(disparity_32f, camera, points, subpixel);
 		drawPoints3D(points, draw);
 
 		disparity_32f.convertTo(disparity_8u, CV_8U, 255. / disp_size);
@@ -272,13 +253,51 @@ int main(int argc, char* argv[])
 		disparity_color.setTo(cv::Scalar(0, 0, 0), disparity_32f < 0); // invalid disparity will be negative
 		cv::putText(disparity_color, format_string("sgm execution time: %4.1f[msec] %4.1f[FPS]", 1e-3 * duration, fps),
 			cv::Point(50, 50), 2, 0.75, cv::Scalar(255, 255, 255));
-		cv::imwrite("left_image.png", I1);
-		cv::imwrite("right_image.png", I2);
-		cv::imwrite("disparity.png", disparity_color);
-		cv::imwrite("points.png", draw);
-		return 0;*/
-		std::cerr << "Processed frame no " << frame_no << std::endl;
+
+		cv::imshow("left image", I1);
+		cv::imshow("disparity", disparity_color);
+		cv::imshow("points", draw);
+
+		const char c = cv::waitKey(1);
+		if (c == 27) // ESC
+			break;
 	}
 
 	return 0;
+}
+int main(int argc, char* argv[])
+{
+	cv::CommandLineParser parser(argc, argv,
+			"{@left_image   |<none>    | path to input left image(s)}"
+			"{@right_image  |<none>    | path to input right image(s)}"
+			"{@xml          |          | path to xml file(s)}"
+			"{disp_size     |          | [optional] disparity size}"
+			"{s             |          | [optional] enable subpixel}"
+			"{f             |          | [optional] convert folder}"
+			"{save          |<none>    | [optional] folder as save location}");
+
+	if (parser.has("f")) {
+		// convert multiple images and thus work with folders
+		
+	} else {
+		std::string leftImageStr = parser.get<std::string>("@left_image");
+		std::string rightImageStr = parser.get<std::string>("@right_image");
+		std::string xmlStr = parser.get<std::string>("@xml");
+		std::string dispSizeStr = parser.get<std::string>("disp_size");
+		bool useDispSize = parser.has("disp_size");
+		bool useSubPixel = parser.has("s");
+
+		const char* leftImage = leftImageStr.c_str();
+		const char* rightImage = rightImageStr.c_str();
+		const char* xml = xmlStr.c_str();
+		const char* dispSize = dispSizeStr.c_str();
+		compute(leftImage, rightImage, xml, useDispSize, dispSize, useSubPixel);
+	  
+	}
+	return 0;
+//if (argc < 4) {
+//		std::cout << "usage: " << argv[0] << " left-image-format right-image-format camera.xml [disp_size] [subpixel_enable(0: false, 1:true)]" << std::endl;
+//		std::exit(EXIT_FAILURE);
+//	}
+
 }

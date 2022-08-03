@@ -1,2 +1,11 @@
 include/libsgm_config.h
 build/
+kitti_data_sample/
+converted_pclouds/
+.idea/
+testbuild/
+build2/
+pcviewer/
+pcviewer
+data/
+__pycache__/
